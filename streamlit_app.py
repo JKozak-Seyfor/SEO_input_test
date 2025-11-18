@@ -12,11 +12,12 @@ from difflib import SequenceMatcher
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Optional OpenAI import (only used if user selects API mode)
+# Optional OpenAI import (použije se jen v API režimu; app funguje i bez něj)
 try:
-    import openai  # legacy
+    import openai  # legacy klient
 except Exception:
     openai = None
+
 
 # -------------------------------
 # Config & helpers
@@ -34,8 +35,9 @@ class Limits:
 
 DEFAULT_LIMITS = Limits()
 
-BANNED_PATTERN_TITLE = re.compile(r"[!]", flags=0)  # keep simple; emojis vary by environment
+BANNED_PATTERN_TITLE = re.compile(r"[!]", flags=0)  # jednoduché: zákaz '!'
 URL_PATTERN = re.compile(r"https?://|www\.", re.I)
+
 
 def normalize_keyword(name: str) -> str:
     if not isinstance(name, str):
@@ -48,6 +50,7 @@ def normalize_keyword(name: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s.split()[0] if s else ""
 
+
 def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None) -> str:
     t = (text or "").strip()
     if min_len and len(t) < min_len:
@@ -57,20 +60,26 @@ def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None
         t = re.sub(r"\s+\S*$", "", t)
     return t
 
+
 def simple_stub_generate(keyword: str, limits: Limits) -> dict:
     kw = keyword.capitalize() or "Téma"
-    page_title = ensure_len(f"{kw} – průvodce a tipy", limits.title_min, limits.title_max)
-    h1 = ensure_len(f"{kw} – novinky a přehled", limits.h1_min, limits.h1_max)
-    desc = ensure_len(f"{kw} v kostce: co to je, k čemu slouží a jak z něj vytěžit maximum. Praktické rady a stručné tipy v jednom místě.",
-                      limits.desc_min, limits.desc_max)
-    # body (≥1200 chars)
+    page_title = ensure_len(f"{kw} – průvodce a tipy",
+                            limits.title_min, limits.title_max)
+    h1 = ensure_len(f"{kw} – novinky a přehled",
+                    limits.h1_min, limits.h1_max)
+    desc = ensure_len(
+        f"{kw} v kostce: co to je, k čemu slouží a jak z něj vytěžit maximum. "
+        f"Praktické rady a stručné tipy v jednom místě.",
+        limits.desc_min, limits.desc_max
+    )
+    # body (≥1200 znaků)
     paras = []
     intro = (f"{kw} patří mezi témata, která lidé často hledají, ale zároveň u nich narážejí na rozporné informace. "
              f"V tomto přehledu shrnujeme klíčové pojmy, přínosy a časté omyly. Najdete zde praktické postupy, jak začít.")
-    p2 = (f"Co si pod pojmem {kw} přesně představit? Nejlépe uděláme, když si projdeme základní definici a ukážeme, jak se používá v praxi. "
-          f"Důležitý je kontext: kdo bude výsledky využívat a jaké jsou cíle.")
-    p3 = ("Jak začít krok za krokem: určete priority, sbírejte jen data, která skutečně potřebujete, a ověřujte si zdroje. "
-          "Zkoušejte malé iterace, vyhodnocujte dopady a dokumentujte závěry.")
+    p2 = (f"Co si pod pojmem {kw} přesně představit? Nejlépe uděláme, když si projdeme základní definici a ukážeme, "
+          f"jak se používá v praxi. Důležitý je kontext: kdo bude výsledky využívat a jaké jsou cíle.")
+    p3 = ("Jak začít krok za krokem: určete priority, sbírejte jen data, která skutečně potřebujete, "
+          "a ověřujte si zdroje. Zkoušejte malé iterace, vyhodnocujte dopady a dokumentujte závěry.")
     p4 = ("Na co si dát pozor: vyhněte se univerzálním radám bez kontextu a průběžně pracujte s riziky. "
           "Checklist: cíl, metrika, odpovědnosti, termíny a zpětná vazba.")
     body = "\n\n".join([intro, p2, p3, p4])
@@ -78,12 +87,17 @@ def simple_stub_generate(keyword: str, limits: Limits) -> dict:
         body += "\n\n" + ("Další doporučení: " + " ".join(["Doplňte příklady z vlastní praxe." for _ in range(80)]))
     body = ensure_len(body, min_len=limits.body_min)
 
-    # English quick variants
-    page_title_en = ensure_len(f"{kw} – guide and tips", limits.title_min, limits.title_max)
-    h1_en = ensure_len(f"{kw} – updates and overview", limits.h1_min, limits.h1_max)
-    desc_en = ensure_len(f"{kw} explained: what it is, where it helps and how to make the most of it. Practical advice and concise tips in one place.",
-                         limits.desc_min, limits.desc_max)
-    body_en = body  # in stub mode we reuse; in API mode you would actually translate
+    # EN rychlé varianty (stub)
+    page_title_en = ensure_len(f"{kw} – guide and tips",
+                               limits.title_min, limits.title_max)
+    h1_en = ensure_len(f"{kw} – updates and overview",
+                       limits.h1_min, limits.h1_max)
+    desc_en = ensure_len(
+        f"{kw} explained: what it is, where it helps and how to make the most of it. "
+        f"Practical advice and concise tips in one place.",
+        limits.desc_min, limits.desc_max
+    )
+    body_en = body  # v demo režimu recyklujeme; v API režimu by se překládalo
 
     return {
         "page_title": page_title,
@@ -96,13 +110,16 @@ def simple_stub_generate(keyword: str, limits: Limits) -> dict:
         "text_on_page_eng": body_en,
     }
 
+
 def similar_title(a: str, b: str) -> float:
     return SequenceMatcher(None, a or "", b or "").ratio()
 
+
 def similar_long(a: str, b: str) -> float:
-    vect = TfidfVectorizer(ngram_range=(3,5), min_df=1)
+    vect = TfidfVectorizer(ngram_range=(3, 5), min_df=1)
     X = vect.fit_transform([a or "", b or ""])
-    return float(cosine_similarity(X[0], X[1])[0,0])
+    return float(cosine_similarity(X[0], X[1])[0, 0])
+
 
 def validate_row(rec: dict, limits: Limits) -> list[str]:
     errs = []
@@ -125,6 +142,7 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
         errs.append("description contains URL")
 
     return errs
+
 
 # -------------------------------
 # Streamlit UI
@@ -150,25 +168,32 @@ with st.sidebar:
     dedup_body_threshold = st.slider("Prahová podobnost – dlouhá pole (0–1)", 0.5, 1.0, 0.85, 0.01)
 
     if mode == "OpenAI API":
-        api_key = st.text_input("OpenAI API key", type="password")
+        api_key = st.text_input("OpenAI API key", type="password", value=os.environ.get("OPENAI_API_KEY", ""))
     else:
         api_key = ""
 
-uploaded = st.file_uploader("Nahraj CSV nebo XLSX", type=["csv", "xlsx"])
+# Upload (robustní handling)
+uploaded = st.file_uploader("Nahraj CSV nebo XLSX", type=["csv", "xlsx"], accept_multiple_files=False)
 
-if uploaded.name.lower().endswith(".xlsx"):
-    try:
-        df = pd.read_excel(uploaded, engine="openpyxl")
-    except Exception as e:
-        st.error(f"Chyba při čtení XLSX (zkontroluj openpyxl): {e}")
-        st.stop()
-else:
-    # try ; then , as delimiter
-    data = uploaded.getvalue().decode("utf-8", errors="ignore")
-    try:
-        df = pd.read_csv(io.StringIO(data), sep=";")
-    except Exception:
-        df = pd.read_csv(io.StringIO(data), sep=",")
+# Normalize i kdyby bylo omylem multiple-files
+if uploaded is not None and isinstance(uploaded, list):
+    uploaded = uploaded[0] if uploaded else None
+
+if uploaded is not None:
+    # Načtení podle přípony (s ochranou na .name)
+    if hasattr(uploaded, "name") and str(uploaded.name).lower().endswith(".xlsx"):
+        try:
+            df = pd.read_excel(uploaded, engine="openpyxl")
+        except Exception as e:
+            st.error(f"Chyba při čtení XLSX (zkontroluj openpyxl): {e}")
+            st.stop()
+    else:
+        # CSV – zkusit ; a pak ,
+        data = uploaded.getvalue().decode("utf-8", errors="ignore")
+        try:
+            df = pd.read_csv(io.StringIO(data), sep=";")
+        except Exception:
+            df = pd.read_csv(io.StringIO(data), sep=",")
 
     st.subheader("Náhled")
     st.dataframe(df.head(20))
@@ -176,71 +201,76 @@ else:
     # Column mapping
     st.subheader("Mapování sloupců")
     cols = df.columns.tolist()
-    name_col = st.selectbox("Sloupec s Name (klíčové slovo/URL)", options=cols, index=cols.index("name") if "name" in cols else 0)
+    default_idx = cols.index("name") if "name" in cols else 0
+    name_col = st.selectbox("Sloupec s Name (klíčové slovo/URL)", options=cols, index=default_idx)
 
     # Process button
     if st.button("Vygenerovat a validovat"):
-        out_rows = []
-        logs = []
+        out_rows: list[dict] = []
+        logs: list[dict] = []
 
-        # Precompute sets for dedup
+        # Dedup paměť
         prev_titles: list[str] = []
         prev_bodies: list[str] = []
 
         for idx, row in df.iterrows():
             keyword = normalize_keyword(str(row.get(name_col, "")))
+
             if mode == "Template (offline stub)":
                 rec = simple_stub_generate(keyword, limits)
             else:
-                # Fallback to stub if API is not provided/available
+                # OpenAI API režim (fallback na stub, když není k dispozici)
                 if not api_key or openai is None:
                     rec = simple_stub_generate(keyword, limits)
                 else:
-                    # Example API call (chat.completions) – keep minimal to avoid coupling
                     openai.api_key = api_key
                     sys_prompt = (
                         "You are a Czech senior copywriter. Generate JSON with keys: "
                         "page_title (30-50 chars), title_for_newest_advertisement_list (20-40), "
-                        "description (140-160), text_on_page (>=1200). Avoid exclamation marks and URLs in description."
+                        "description (140-160), text_on_page (>=1200). "
+                        "Avoid exclamation marks and URLs in description."
                     )
                     user_prompt = f'keyword="{keyword}"'
                     try:
+                        # Pozn.: starý klient (ChatCompletion); v novém by se použilo Responses API
                         resp = openai.ChatCompletion.create(
                             model="gpt-4o-mini",
-                            messages=[{"role":"system","content":sys_prompt},
-                                      {"role":"user","content":user_prompt}],
+                            messages=[
+                                {"role": "system", "content": sys_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
                             temperature=0.7,
                         )
                         content = resp["choices"][0]["message"]["content"]
-                        # Best effort JSON extraction
                         start = content.find("{")
                         end = content.rfind("}")
                         payload = json.loads(content[start:end+1])
-                        # Add EN as copies (or you could call again for EN)
                         rec = {
-                            "page_title": payload.get("page_title",""),
-                            "title_for_newest_advertisement_list": payload.get("title_for_newest_advertisement_list",""),
-                            "description": payload.get("description",""),
-                            "text_on_page": payload.get("text_on_page",""),
-                            "page_title_eng": payload.get("page_title_eng", payload.get("page_title","")),
-                            "title_for_newest_advertisement_list_eng": payload.get("title_for_newest_advertisement_list_eng", payload.get("title_for_newest_advertisement_list","")),
-                            "description_eng": payload.get("description_eng", payload.get("description","")),
-                            "text_on_page_eng": payload.get("text_on_page_eng", payload.get("text_on_page","")),
+                            "page_title": payload.get("page_title", ""),
+                            "title_for_newest_advertisement_list": payload.get("title_for_newest_advertisement_list", ""),
+                            "description": payload.get("description", ""),
+                            "text_on_page": payload.get("text_on_page", ""),
+                            "page_title_eng": payload.get("page_title_eng", payload.get("page_title", "")),
+                            "title_for_newest_advertisement_list_eng": payload.get("title_for_newest_advertisement_list_eng", payload.get("title_for_newest_advertisement_list", "")),
+                            "description_eng": payload.get("description_eng", payload.get("description", "")),
+                            "text_on_page_eng": payload.get("text_on_page_eng", payload.get("text_on_page", "")),
                         }
-                    except Exception as e:
+                    except Exception:
                         rec = simple_stub_generate(keyword, limits)
 
             # Validation
             errs = validate_row(rec, limits)
 
-            # Dedup vs previous (short fields)
+            # Dedup vs. previous (short fields)
             sim_t = max([similar_title(rec["page_title"], t) for t in prev_titles], default=0.0)
             if sim_t >= dedup_title_threshold:
-                # Rephrase lightly
-                rec["page_title"] = ensure_len(f"{keyword.capitalize()} – přehled a doporučení", limits.title_min, limits.title_max)
+                rec["page_title"] = ensure_len(
+                    f"{keyword.capitalize()} – přehled a doporučení",
+                    limits.title_min, limits.title_max
+                )
                 errs = validate_row(rec, limits)
 
-            # Dedup body with tf-idf cosine
+            # Dedup body TF-IDF cosine
             sim_b = max([similar_long(rec["text_on_page"], b) for b in prev_bodies], default=0.0)
             if sim_b >= dedup_body_threshold:
                 rec["text_on_page"] = rec["text_on_page"] + "\n\nPřidaná sekce: Konkrétní příklad použití a checklist kroků."
@@ -262,7 +292,13 @@ else:
                 "title_for_newest_advertisement_list_eng": rec["title_for_newest_advertisement_list_eng"],
             }
             out_rows.append(out)
-            logs.append({"row": int(idx), "keyword": keyword, "errors": errs, "sim_title": sim_t, "sim_body": sim_b})
+            logs.append({
+                "row": int(idx),
+                "keyword": keyword,
+                "errors": errs,
+                "sim_title": sim_t,
+                "sim_body": sim_b
+            })
 
             if chunk_sleep > 0:
                 time.sleep(chunk_sleep)
@@ -279,25 +315,16 @@ else:
                 "desc_len": len(r["description"]),
                 "body_len": len(r["text_on_page"]),
             })
+
         st.subheader("Kontrola délek (výběr)")
         st.dataframe(out_df.apply(check_lengths, axis=1).head(50))
 
         # Download
         csv = out_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Stáhnout CSV (UTF-8)", data=csv, file_name="doplnene_texty.csv", mime="text/csv")
+        st.download_button("Stáhnout CSV (UTF-8)", data=csv,
+                           file_name="doplnene_texty.csv", mime="text/csv")
 
         st.subheader("Log validačních kontrol")
         st.json(logs)
-if uploaded.name.lower().endswith(".xlsx"):
-    try:
-        df = pd.read_excel(uploaded, engine="openpyxl")
-    except Exception as e:
-        st.error(f"Chyba při čtení XLSX (zkontroluj openpyxl): {e}")
-        st.stop()
 else:
-    # try ; then , as delimiter
-    data = uploaded.getvalue().decode("utf-8", errors="ignore")
-    try:
-        df = pd.read_csv(io.StringIO(data), sep=";")
-    except Exception:
-        df = pd.read_csv(io.StringIO(data), sep=",")
+    st.info("Nahraj CSV/XLSX se sloupcem 'name' (nebo vyber odpovídající sloupec po nahrání).")
