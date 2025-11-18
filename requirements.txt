@@ -1,0 +1,4 @@
+streamlit
+pandas
+scikit-learn
+openai==0.28.1
