@@ -156,20 +156,19 @@ with st.sidebar:
 
 uploaded = st.file_uploader("Nahraj CSV nebo XLSX", type=["csv", "xlsx"])
 
-if uploaded is not None:
-    if uploaded.name.lower().endswith(".xlsx"):
-        try:
+if uploaded.name.lower().endswith(".xlsx"):
+    try:
         df = pd.read_excel(uploaded, engine="openpyxl")
     except Exception as e:
         st.error(f"Chyba při čtení XLSX (zkontroluj openpyxl): {e}")
         st.stop()
-    else:
-        # try ; then , as delimiter
-        data = uploaded.getvalue().decode("utf-8", errors="ignore")
-        try:
-            df = pd.read_csv(io.StringIO(data), sep=";")
-        except Exception:
-            df = pd.read_csv(io.StringIO(data), sep=",")
+else:
+    # try ; then , as delimiter
+    data = uploaded.getvalue().decode("utf-8", errors="ignore")
+    try:
+        df = pd.read_csv(io.StringIO(data), sep=";")
+    except Exception:
+        df = pd.read_csv(io.StringIO(data), sep=",")
 
     st.subheader("Náhled")
     st.dataframe(df.head(20))
