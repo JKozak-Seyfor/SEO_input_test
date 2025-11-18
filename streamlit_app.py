@@ -159,7 +159,11 @@ uploaded = st.file_uploader("Nahraj CSV nebo XLSX", type=["csv", "xlsx"])
 
 if uploaded is not None:
     if uploaded.name.lower().endswith(".xlsx"):
-        df = pd.read_excel(uploaded)
+        try:
+        df = pd.read_excel(uploaded, engine="openpyxl")
+    except Exception as e:
+        st.error(f"Chyba při čtení XLSX (zkontroluj openpyxl): {e}")
+        st.stop()
     else:
         # try ; then , as delimiter
         data = uploaded.getvalue().decode("utf-8", errors="ignore")
