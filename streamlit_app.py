@@ -167,6 +167,7 @@ with st.sidebar:
     dedup_title_threshold = st.slider("Prahová podobnost – krátká pole (0–1)", 0.5, 1.0, 0.90, 0.01)
     dedup_body_threshold = st.slider("Prahová podobnost – dlouhá pole (0–1)", 0.5, 1.0, 0.85, 0.01)
 
+    # Načte se ze Secrets/ENV a rovnou se předvyplní
     if mode == "OpenAI API":
         api_key = st.text_input("OpenAI API key", type="password", value=os.environ.get("OPENAI_API_KEY", ""))
     else:
@@ -213,23 +214,18 @@ if uploaded is not None:
         prev_titles: list[str] = []
         prev_bodies: list[str] = []
 
-       progress_text = st.empty()
-progress_bar = st.progress(0)
+        # --- Progress indikace ---
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        total = len(df)
 
-total = len(df)
-for idx, row in df.iterrows():
-    keyword = normalize_keyword(str(row.get(name_col, "")))
+        for idx, row in df.iterrows():
+            keyword = normalize_keyword(str(row.get(name_col, "")))
 
-    # aktualizuj progress bar
-    percent = int((idx + 1) / total * 100)
-    progress_bar.progress(percent)
-    progress_text.text(f"Zpracovávám {idx + 1}/{total} – {keyword}...")
-
-    # --- zbytek původního kódu generování ---
-    if mode == "Template (offline stub)":
-        rec = simple_stub_generate(keyword, limits)
-    else:
-        ...
+            # aktualizace progressu
+            percent = int((idx + 1) / total * 100)
+            progress_bar.progress(percent)
+            progress_text.text(f"Zpracovávám {idx + 1}/{total} – {keyword}...")
 
             if mode == "Template (offline stub)":
                 rec = simple_stub_generate(keyword, limits)
@@ -317,6 +313,10 @@ for idx, row in df.iterrows():
 
             if chunk_sleep > 0:
                 time.sleep(chunk_sleep)
+
+        # --- Progress: dokončeno ---
+        progress_bar.empty()
+        progress_text.text("✅ Hotovo – generování dokončeno.")
 
         out_df = pd.DataFrame(out_rows)
         st.subheader("Výsledek")
