@@ -213,8 +213,23 @@ if uploaded is not None:
         prev_titles: list[str] = []
         prev_bodies: list[str] = []
 
-        for idx, row in df.iterrows():
-            keyword = normalize_keyword(str(row.get(name_col, "")))
+       progress_text = st.empty()
+progress_bar = st.progress(0)
+
+total = len(df)
+for idx, row in df.iterrows():
+    keyword = normalize_keyword(str(row.get(name_col, "")))
+
+    # aktualizuj progress bar
+    percent = int((idx + 1) / total * 100)
+    progress_bar.progress(percent)
+    progress_text.text(f"Zpracovávám {idx + 1}/{total} – {keyword}...")
+
+    # --- zbytek původního kódu generování ---
+    if mode == "Template (offline stub)":
+        rec = simple_stub_generate(keyword, limits)
+    else:
+        ...
 
             if mode == "Template (offline stub)":
                 rec = simple_stub_generate(keyword, limits)
