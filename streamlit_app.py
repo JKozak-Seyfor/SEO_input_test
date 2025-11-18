@@ -288,5 +288,16 @@ else:
 
         st.subheader("Log validačních kontrol")
         st.json(logs)
+if uploaded.name.lower().endswith(".xlsx"):
+    try:
+        df = pd.read_excel(uploaded, engine="openpyxl")
+    except Exception as e:
+        st.error(f"Chyba při čtení XLSX (zkontroluj openpyxl): {e}")
+        st.stop()
 else:
-    st.info("Nahraj CSV/XLSX se sloupcem 'name' nebo vyber odpovídající sloupec.")
+    # try ; then , as delimiter
+    data = uploaded.getvalue().decode("utf-8", errors="ignore")
+    try:
+        df = pd.read_csv(io.StringIO(data), sep=";")
+    except Exception:
+        df = pd.read_csv(io.StringIO(data), sep=",")
