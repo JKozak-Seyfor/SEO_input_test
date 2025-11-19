@@ -145,7 +145,7 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 
 
 # -------------------------------
-# OpenAI – batch generování
+# OpenAI – batch generování s NOVÝM PROMPTEM
 # -------------------------------
 
 def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, hard_negatives: list[str]) -> list[dict]:
@@ -166,43 +166,47 @@ def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, har
         "text_on_page_min": limits.body_min
     }
 
+    # SYSTÉMOVÝ PROMPT – styl a pravidla dle vzorku
     sys_prompt = (
-        "Jsi seniorní český copywriter a SEO editor. Dodrž přesně zadání a vrať POUZE validní JSON pole.\n"
-        "Piš věcně, bez superlativů a klišé. V Title/H1 nepoužívej vykřičníky ani emoji. "
-        "V Description nesmí být URL. Každá položka musí být unikátní v rámci dávky.\n"
+        "Jsi zkušený český copywriter a SEO specialista, který píše smyslné, ale korektní texty "
+        "pro web zaměřený na erotické služby. Dodrž přesně zadání a vrať POUZE validní JSON pole. "
+        "Piš věcně, decentně, bez vulgarismů a bez klišé. V Title/H1 nepoužívej vykřičníky ani emoji; "
+        "v Description nesmí být URL. Každá položka musí být unikátní v rámci dávky.\n"
     )
 
+    # Vstupní items: index + keyword
     items = [{"idx": i, "name": k} for i, k in enumerate(keywords)]
 
+    # UŽIVATELSKÝ PROMPT – přesné instrukce a struktura JSONu
     user_prompt = f"""
 Máš dávku položek (pole objektů {{idx, name}}):
 {json.dumps(items, ensure_ascii=False)}
 
-Vrať POUZE JSON pole stejné délky, kde každý prvek má strukturu:
+Na základě hodnoty name (klíčové slovo / téma) vygeneruj pro KAŽDOU položku objekt se strukturou:
 {{
   "idx": <číslo z inputu>,
-  "page_title": "...",                        // CZ, {limits.title_min}–{limits.title_max} znaků, obsahuje keyword přirozeně, bez '!'
-  "title_for_newest_advertisement_list": "...", // CZ H1, {limits.h1_min}–{limits.h1_max} znaků, bez '!'
-  "description": "...",                       // CZ, {limits.desc_min}–{limits.desc_max} znaků, bez URL
-  "text_on_page": "...",                      // CZ, ≥{limits.body_min} znaků; struktura: úvod → 2–4 odstavce → závěr/VK
-  "page_title_eng": "...",                    // EN varianta title, stejné rozsahy, bez '!'
-  "title_for_newest_advertisement_list_eng": "...", // EN H1
-  "description_eng": "...",                   // EN description, bez URL
-  "text_on_page_eng": "..."                   // EN text, ≥{limits.body_min} znaků
+  "page_title": "...",                         // CZ, {limits.title_min}–{limits.title_max} znaků, obsahuje klíčové slovo přirozeně, styl: benefit/lákadlo, BEZ '!'
+  "description": "...",                        // CZ, {limits.desc_min}–{limits.desc_max} znaků, shrnutí + jemné CTA, BEZ URL
+  "text_on_page": "...",                       // CZ, ≥{limits.body_min} znaků; HTML-like struktura: úvod (definice + přínos) → 2–3 H3 podtémata → závěr s přirozenou výzvou
+  "title_for_newest_advertisement_list": "...",// CZ H1, {limits.h1_min}–{limits.h1_max} znaků; krátké, úderné (např. „Holky na…“, „Erotické dívky v…“), BEZ '!'
+  "page_title_eng": "...",                     // EN varianta page_title, smysluplný překlad/přepis, stejné rozsahy, BEZ '!'
+  "description_eng": "...",                    // EN varianta description, bez URL
+  "text_on_page_eng": "...",                   // EN varianta text_on_page, zachovej strukturu, ≥{limits.body_min} znaků
+  "title_for_newest_advertisement_list_eng": "..." // EN varianta H1
 }}
 
 POVINNÁ pravidla:
-1) Dodrž délkové limity přesně (nepodkroč ani nepřekroč).
-2) V title/H1 nepoužívej vykřičníky/emoji; v description nesmí být URL.
-3) Klíčové slovo použij přirozeně v page_title, H1, description a v úvodu text_on_page.
-4) Styl: srozumitelný, praktický, bez klišé.
-5) Unikátnost: vyhni se podobnostem k těmto titulům/H1 (hard negatives) i mezi položkami dávky:
-   {json.dumps(hard_negatives[:20], ensure_ascii=False)}
-6) Vrať POUZE JSON pole – žádný text navíc.
+1) Přesně dodrž délkové limity (Title {limits.title_min}–{limits.title_max}, H1 {limits.h1_min}–{limits.h1_max}, Description {limits.desc_min}–{limits.desc_max}, text ≥{limits.body_min}).
+2) V Title/H1 bez vykřičníků a emoji; v Description bez odkazů/URL.
+3) Klíčové slovo (name) použij přirozeně v page_title, H1, description i v úvodu text_on_page.
+4) Styl: smyslný, ale decentní; piš pro dospělého čtenáře, zdůrazni komfort, diskrétnost a zážitek.
+5) Unikátnost: vyhni se podobnostem k těmto existujícím titulům/H1 (hard negatives) i k sobě navzájem v rámci dávky:
+   {json.dumps(hard_negatives[:30], ensure_ascii=False)}
 
-Délkové limity:
+Vrať POUZE JSON pole stejné délky a pořadí jako vstup – žádný doprovodný text. Délkové limity pro kontrolu:
 {json.dumps(limits_payload, ensure_ascii=False, indent=2)}
 """
+
     try:
         resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
