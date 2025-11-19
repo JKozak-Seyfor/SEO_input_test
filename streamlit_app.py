@@ -118,7 +118,7 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 # OpenAI helpers
 # -------------------------------
 
-def _call_openai_json_safe(model_name: str, messages: list, max_tokens: int = 4000, temperature: float = 0.6) -> str:
+def _call_openai_json_safe(model_name: str, messages: list, max_completion_tokens: int = 6000, temperature: float = 0.6) -> str:
     """
     Zavolá ChatCompletion. Nejprve se pokusí o 'JSON mode' (response_format),
     pokud knihovna/model nepodporuje, zkusí standardní volání.
