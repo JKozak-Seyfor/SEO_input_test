@@ -118,36 +118,48 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 # OpenAI helpers
 # -------------------------------
 
-def _call_openai_json_safe(model_name: str, messages: list, max_completion_tokens: int = 6000, temperature: float = 0.6) -> str:
+def _call_openai_json_safe(model_name: str, messages: list) -> str:
     """
-    Zavolá ChatCompletion. Nejprve se pokusí o 'JSON mode' (response_format),
-    pokud knihovna/model nepodporuje, zkusí standardní volání.
+    Volá ChatCompletion. Nejprve zkusí 'JSON mode' s max_completion_tokens,
+    při chybě přepne na standardní volání; pokud SDK nepodporuje
+    max_completion_tokens, fallbackne na max_tokens.
     Vrací textový obsah odpovědi.
     """
-    # indikace do UI
-    st.caption(f"🔌 volám OpenAI • model: **{model_name}** • json_mode: try")
+    st.caption(f"🔌 Volám OpenAI • model: **{model_name}**")
 
-    # 1) pokus s JSON mode
+    # 1) JSON mode + max_completion_tokens
     try:
         resp = openai.ChatCompletion.create(
             model=model_name,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            # JSON mode – může, ale nemusí být podporovaný: pokud ne, vyhodí chybu a spadneme do fallbacku
+            temperature=0.6,
+            max_completion_tokens=4000,      # ← preferovaná volba
             response_format={"type": "json_object"},
         )
         return resp["choices"][0]["message"]["content"]
     except Exception as e_json:
-        st.warning(f"JSON mode není k dispozici nebo selhal: {e_json}. Pokračuji bez JSON mode.")
-        # 2) standardní volání
+        st.warning(f"JSON mode nebo max_completion_tokens není dostupné: {e_json}. Zkouším standardní volání.")
+
+    # 2) Standardní volání s max_completion_tokens
+    try:
         resp = openai.ChatCompletion.create(
             model=model_name,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=0.6,
+            max_completion_tokens=4000,      # ← preferovaná volba
         )
         return resp["choices"][0]["message"]["content"]
+    except Exception as e_std1:
+        st.warning(f"Standardní volání s max_completion_tokens selhalo: {e_std1}. Zkouším fallback na max_tokens.")
+
+    # 3) Fallback pro starší SDK: max_tokens
+    resp = openai.ChatCompletion.create(
+        model=model_name,
+        messages=messages,
+        temperature=0.6,
+        max_tokens=4000,                    # ← nejširší kompatibilita
+    )
+    return resp["choices"][0]["message"]["content"]
 
 
 # -------------------------------
@@ -218,8 +230,6 @@ Délkové limity pro kontrolu:
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=4000,
-            temperature=0.6,
         )
 
         # očekáváme JSON pole
