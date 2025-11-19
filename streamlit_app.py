@@ -3,16 +3,13 @@ import io
 import re
 import json
 import time
-import typing as t
 from dataclasses import dataclass
-
 import streamlit as st
 import pandas as pd
 from difflib import SequenceMatcher
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Optional OpenAI import (použije se jen v API režimu; app funguje i bez něj)
 try:
     import openai
 except Exception:
@@ -62,37 +59,28 @@ def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None
 
 
 def simple_stub_generate(keyword: str, limits: Limits) -> dict:
+    """Fallback, pokud selže API volání."""
     kw = keyword.capitalize() or "Téma"
-    page_title = ensure_len(f"{kw} – průvodce a tipy", limits.title_min, limits.title_max)
-    h1 = ensure_len(f"{kw} – novinky a přehled", limits.h1_min, limits.h1_max)
-    desc = ensure_len(
-        f"{kw} v kostce: co to je, k čemu slouží a jak z něj vytěžit maximum. "
-        f"Praktické rady a stručné tipy v jednom místě.",
-        limits.desc_min,
-        limits.desc_max,
-    )
-    body = (
-        f"<h3>{kw}</h3>\n{kw} patří mezi témata, která lidé často hledají, "
-        f"ale zároveň u nich narážejí na rozporné informace. V tomto přehledu shrnujeme klíčové pojmy, přínosy a omyly."
-    )
+    body = f"<h3>{kw}</h3>\n{kw} patří mezi témata, která lidé často hledají, ale zároveň u nich narážejí na rozporné informace."
     if len(body) < limits.body_min:
         body += " " + " ".join(["Rozšiřující text." for _ in range(80)])
 
-    page_title_en = ensure_len(f"{kw} – guide and tips", limits.title_min, limits.title_max)
-    h1_en = ensure_len(f"{kw} – updates and overview", limits.h1_min, limits.h1_max)
-    desc_en = ensure_len(
-        f"{kw} explained: what it is, where it helps and how to make the most of it. Practical advice and concise tips in one place.",
-        limits.desc_min,
-        limits.desc_max,
-    )
     return {
-        "page_title": page_title,
-        "title_for_newest_advertisement_list": h1,
-        "description": desc,
+        "page_title": ensure_len(f"{kw} – průvodce a tipy", limits.title_min, limits.title_max),
+        "title_for_newest_advertisement_list": ensure_len(f"{kw} – novinky a přehled", limits.h1_min, limits.h1_max),
+        "description": ensure_len(
+            f"{kw} v kostce: co to je, k čemu slouží a jak z něj vytěžit maximum. "
+            f"Praktické rady a stručné tipy v jednom místě.",
+            limits.desc_min, limits.desc_max,
+        ),
         "text_on_page": ensure_len(body, min_len=limits.body_min),
-        "page_title_eng": page_title_en,
-        "title_for_newest_advertisement_list_eng": h1_en,
-        "description_eng": desc_en,
+        "page_title_eng": ensure_len(f"{kw} – guide and tips", limits.title_min, limits.title_max),
+        "title_for_newest_advertisement_list_eng": ensure_len(f"{kw} – updates and overview", limits.h1_min, limits.h1_max),
+        "description_eng": ensure_len(
+            f"{kw} explained: what it is, where it helps and how to make the most of it. "
+            f"Practical advice and concise tips in one place.",
+            limits.desc_min, limits.desc_max,
+        ),
         "text_on_page_eng": ensure_len(body, min_len=limits.body_min),
     }
 
@@ -155,32 +143,33 @@ Máš pole objektů ({{idx, name}}):
 Pro každou položku vytvoř objekt:
 {{
   "idx": <číslo>,
-  "page_title": "...",  // 30–50 znaků, CZ, přirozeně obsahuje keyword, benefit/lákadlo
-  "description": "...", // 140–160 znaků, CZ, shrnutí + jemné CTA, bez URL
-  "text_on_page": "...", // ≥1200 znaků, CZ, HTML-like: úvod → 2–3 H3 podtémata → závěr
-  "title_for_newest_advertisement_list": "...", // 20–40 znaků, CZ H1, krátké a úderné
-  "page_title_eng": "...", // EN varianta, stejné délky
-  "description_eng": "...", // EN varianta, stejné délky
-  "text_on_page_eng": "...", // EN text, strukturovaný
-  "title_for_newest_advertisement_list_eng": "..." // EN H1
+  "page_title": "...",  // CZ, 30–50 znaků, přirozeně obsahuje keyword
+  "description": "...", // CZ, 140–160 znaků, shrnutí + CTA, bez URL
+  "text_on_page": "...", // CZ, ≥1200 znaků, HTML-like struktura (úvod → 2–3 H3 podtémata → závěr)
+  "title_for_newest_advertisement_list": "...", // CZ H1, 20–40 znaků, krátké, úderné
+  "page_title_eng": "...", "description_eng": "...",
+  "text_on_page_eng": "...", "title_for_newest_advertisement_list_eng": "..."
 }}
 
-Pravidla:
-1) Dodrž délky: Title {limits.title_min}-{limits.title_max}, H1 {limits.h1_min}-{limits.h1_max}, Desc {limits.desc_min}-{limits.desc_max}, text ≥{limits.body_min}.
-2) Bez vykřičníků, emoji a URL.
-3) Klíčové slovo použij v Title, H1, Description a úvodu textu.
-4) Styl: smyslný, ale decentní; důraz na komfort, diskrétnost, zážitek.
-5) Vyhni se podobnostem s těmito titulky: {json.dumps(hard_negatives[:20], ensure_ascii=False)}
-6) Výsledek vrať jako čisté JSON pole, žádný doprovodný text.
+DŮLEŽITÉ:
+Každý objekt v poli odpovídá jednomu klíčovému slovu (name).
+Obsah MUSÍ být tematicky přizpůsoben tomuto názvu.
+Nepoužívej generické fráze typu „patří mezi témata, která lidé často hledají“.
+Piš konkrétně o daném tématu (např. „Erotické masáže“, „Privát“, „Noční klub“ apod.).
+Styl: smyslný, decentní, bez vulgarit.  
+Vyhni se podobnostem s těmito titulky: {json.dumps(hard_negatives[:20], ensure_ascii=False)}
 
+Vrať pouze čisté JSON pole, žádný doprovodný text.
 Délkové limity:
 {json.dumps(limits_payload, ensure_ascii=False, indent=2)}
 """
 
+    st.info(f"📡 Odesílám dávku {len(keywords)} klíčových slov do OpenAI...")
+
     try:
         resp = openai.ChatCompletion.create(
-            model="gpt-5-nano",  # hlavní model
-            fallback_models=["gpt-4o-mini"],  # záloha
+            model="gpt-5-nano",
+            fallback_models=["gpt-4o-mini"],
             messages=[
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": user_prompt},
@@ -191,9 +180,10 @@ Délkové limity:
         )
         content = resp["choices"][0]["message"]["content"]
         start, end = content.find("["), content.rfind("]")
+        if start == -1 or end == -1:
+            raise ValueError("Model nevrátil validní JSON pole.")
         arr = json.loads(content[start:end+1])
         out_by_idx = {int(x["idx"]): x for x in arr}
-
         results = []
         for i, k in enumerate(keywords):
             x = out_by_idx.get(i)
@@ -207,8 +197,11 @@ Délkové limity:
                 "description_eng": x["description_eng"],
                 "text_on_page_eng": x["text_on_page_eng"],
             })
+        st.success("✅ Odpověď z OpenAI přijata a zpracována.")
         return results
-    except Exception:
+    except Exception as e:
+        st.error(f"⚠️ Chyba při zpracování OpenAI odpovědi: {e}")
+        st.text_area("Částečný obsah odpovědi:", content if 'content' in locals() else "žádný")
         return [simple_stub_generate(k, limits) for k in keywords]
 
 
@@ -216,14 +209,13 @@ Délkové limity:
 # Streamlit UI
 # -------------------------------
 
-st.set_page_config(page_title="CSV Content Generator", layout="wide")
+st.set_page_config(page_title="CSV Content Generator (GPT-5 nano)", layout="wide")
 st.title("CSV Content Generator (CZ/EN) — GPT-5 nano")
 
 with st.sidebar:
-    st.header("Režim generování")
-    mode = st.selectbox("Zvol režim", ["Template (offline stub)", "OpenAI API"], index=1)
-    limits = Limits()
-    batch_size = st.number_input("Batch size", 5, 100, 20)
+    st.header("Nastavení")
+    mode = st.selectbox("Režim", ["Template (offline stub)", "OpenAI API"], index=1)
+    batch_size = st.number_input("Batch size", 1, 20, 5)
     chunk_sleep = st.slider("Prodleva mezi dávkami (s)", 0.0, 5.0, 0.0, 0.5)
     api_key = st.text_input("OpenAI API key", type="password", value=os.environ.get("OPENAI_API_KEY", ""))
 
@@ -250,41 +242,29 @@ if uploaded:
     if st.button("Generovat dávkově"):
         out_rows, logs = [], []
         prev_titles, prev_bodies = [], []
-
         progress_text = st.empty()
         progress_bar = st.progress(0)
         rows = list(df.itertuples(index=True))
         total = len(rows)
         done = 0
-
         all_keywords = [normalize_keyword(str(getattr(r, name_col))) for r in rows]
 
         for start in range(0, total, batch_size):
             end = min(start + batch_size, total)
             batch_keywords = all_keywords[start:end]
             hard_neg = list(dict.fromkeys(prev_titles))[:30]
-
-            batch_out = generate_batch_openai(api_key, batch_keywords, limits, hard_neg)
+            batch_out = generate_batch_openai(api_key, batch_keywords, DEFAULT_LIMITS, hard_neg)
 
             for i, rec in enumerate(batch_out):
                 idx_in_df = rows[start + i].Index
                 row = df.iloc[idx_in_df]
                 keyword = batch_keywords[i]
-                errs = validate_row(rec, limits)
-
+                errs = validate_row(rec, DEFAULT_LIMITS)
                 prev_titles.append(rec["page_title"])
                 prev_bodies.append(rec["text_on_page"])
-
                 out_rows.append({
                     "name": row.get(name_col, ""),
-                    "page_title": rec["page_title"],
-                    "page_title_eng": rec["page_title_eng"],
-                    "description": rec["description"],
-                    "description_eng": rec["description_eng"],
-                    "text_on_page": rec["text_on_page"],
-                    "text_on_page_eng": rec["text_on_page_eng"],
-                    "title_for_newest_advertisement_list": rec["title_for_newest_advertisement_list"],
-                    "title_for_newest_advertisement_list_eng": rec["title_for_newest_advertisement_list_eng"],
+                    **rec
                 })
                 logs.append({"row": int(idx_in_df), "keyword": keyword, "errors": errs})
 
