@@ -32,7 +32,7 @@ class Limits:
 
 DEFAULT_LIMITS = Limits()
 
-BANNED_PATTERN_TITLE = re.compile(r"[!]", flags=0)
+BANNED_PATTERN_TITLE = re.compile(r"[!]")
 URL_PATTERN = re.compile(r"https?://|www\.", re.I)
 
 
@@ -59,7 +59,7 @@ def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None
 
 
 def simple_stub_generate(keyword: str, limits: Limits) -> dict:
-    """Fallback, pokud selže API volání."""
+    """Fallback, když selže OpenAI – generická, ale validní data."""
     kw = (keyword or "Téma").capitalize()
     body = (
         f"<h3>{kw}</h3>\n"
@@ -115,55 +115,40 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 
 
 # -------------------------------
-# OpenAI helpers
+# OpenAI helpers (GPT-5 nano/mini)
 # -------------------------------
 
 def _call_openai_json_safe(model_name: str, messages: list) -> str:
     """
-    Volá ChatCompletion. Nejprve zkusí 'JSON mode' s max_completion_tokens,
-    při chybě přepne na standardní volání; pokud SDK nepodporuje
-    max_completion_tokens, fallbackne na max_tokens.
-    Vrací textový obsah odpovědi.
+    Volá ChatCompletion s parametrem max_completion_tokens.
+    Nejprve se pokusí o JSON režim (response_format=json_object).
+    Když JSON režim selže, použije standardní odpověď (pořád s max_completion_tokens).
     """
     st.caption(f"🔌 Volám OpenAI • model: **{model_name}**")
 
-    # 1) JSON mode + max_completion_tokens
+    # 1) JSON mode
     try:
         resp = openai.ChatCompletion.create(
             model=model_name,
             messages=messages,
-            temperature=0.6,
-            max_completion_tokens=4000,      # ← preferovaná volba
+            max_completion_tokens=4000,  # moderní param
             response_format={"type": "json_object"},
         )
         return resp["choices"][0]["message"]["content"]
     except Exception as e_json:
-        st.warning(f"JSON mode nebo max_completion_tokens není dostupné: {e_json}. Zkouším standardní volání.")
+        st.warning(f"JSON mode selhal: {e_json}. Zkouším standardní volání.")
 
-    # 2) Standardní volání s max_completion_tokens
-    try:
-        resp = openai.ChatCompletion.create(
-            model=model_name,
-            messages=messages,
-            temperature=0.6,
-            max_completion_tokens=4000,      # ← preferovaná volba
-        )
-        return resp["choices"][0]["message"]["content"]
-    except Exception as e_std1:
-        st.warning(f"Standardní volání s max_completion_tokens selhalo: {e_std1}. Zkouším fallback na max_tokens.")
-
-    # 3) Fallback pro starší SDK: max_tokens
+    # 2) Standardní výstup
     resp = openai.ChatCompletion.create(
         model=model_name,
         messages=messages,
-        temperature=0.6,
-        max_tokens=4000,                    # ← nejširší kompatibilita
+        max_completion_tokens=4000,
     )
     return resp["choices"][0]["message"]["content"]
 
 
 # -------------------------------
-# OpenAI batch generator (GPT-5 nano / mini)
+# OpenAI batch generator
 # -------------------------------
 
 def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, hard_negatives: list[str], model_name: str) -> list[dict]:
@@ -178,17 +163,14 @@ def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, har
         "text_on_page_min": limits.body_min,
     }
 
-    # role/system
     sys_prompt = (
         "You are a skilled Czech SEO copywriter specializing in tasteful adult-oriented content. "
         "Generate unique, structured website texts in Czech and English exactly according to the JSON format provided. "
         "No exclamation marks, no vulgarities, no URLs. Titles and descriptions must fit the length limits strictly."
     )
 
-    # vstupní data pro dávku
     items = [{"idx": i, "name": k} for i, k in enumerate(keywords)]
 
-    # uživatelský prompt
     user_prompt = f"""
 Máš pole objektů ({{idx, name}}):
 {json.dumps(items, ensure_ascii=False)}
@@ -202,7 +184,7 @@ Pro každou položku vytvoř objekt se strukturou:
   "title_for_newest_advertisement_list": "...",// CZ H1, 20–40 znaků, krátké, úderné, bez '!'
   "page_title_eng": "...",                     // EN varianta title, stejné limity
   "description_eng": "...",                    // EN varianta description, bez URL
-  "text_on_page_eng": "...",                   // EN, zachovej strukturu, ≥{limits.body_min} znaků
+  "text_on_page_eng": "...",                   // EN text, zachovej strukturu, ≥{limits.body_min} znaků
   "title_for_newest_advertisement_list_eng": "..." // EN H1
 }}
 
@@ -220,7 +202,6 @@ Délkové limity pro kontrolu:
 {json.dumps(limits_payload, ensure_ascii=False, indent=2)}
 """
 
-    # viditelná indikace pro uživatele
     st.info(f"📡 Odesílám dávku {len(keywords)} klíčových slov do OpenAI • model: **{model_name}**")
 
     try:
@@ -232,7 +213,6 @@ Délkové limity pro kontrolu:
             ],
         )
 
-        # očekáváme JSON pole
         start, end = content.find("["), content.rfind("]")
         if start == -1 or end == -1:
             raise ValueError("Model nevrátil validní JSON pole (chybí '[' nebo ']').")
@@ -275,7 +255,6 @@ with st.sidebar:
     st.header("Nastavení")
     mode = st.selectbox("Režim", ["Template (offline stub)", "OpenAI API"], index=1)
 
-    # Přepínač modelu
     model_name = st.selectbox(
         "OpenAI model",
         options=["gpt-5-nano", "gpt-5-mini"],
