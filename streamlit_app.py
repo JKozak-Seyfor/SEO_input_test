@@ -145,6 +145,104 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 
 
 # -------------------------------
+# OpenAI – batch generování
+# -------------------------------
+
+def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, hard_negatives: list[str]) -> list[dict]:
+    """
+    Vrátí pole dictů (jeden dict = 1 řádek CSV) pro danou dávku 'keywords'.
+    Každý dict obsahuje CZ+EN pole: page_title, title_for_newest_advertisement_list, description, text_on_page, *_eng.
+    """
+    if openai is None or not api_key:
+        # fallback – použij lokální šablonu pro každý keyword
+        return [simple_stub_generate(k, limits) for k in keywords]
+
+    openai.api_key = api_key
+
+    limits_payload = {
+        "page_title": {"min": limits.title_min, "max": limits.title_max},
+        "h1": {"min": limits.h1_min, "max": limits.h1_max},
+        "description": {"min": limits.desc_min, "max": limits.desc_max},
+        "text_on_page_min": limits.body_min
+    }
+
+    sys_prompt = (
+        "Jsi seniorní český copywriter a SEO editor. Dodrž přesně zadání a vrať POUZE validní JSON pole.\n"
+        "Piš věcně, bez superlativů a klišé. V Title/H1 nepoužívej vykřičníky ani emoji. "
+        "V Description nesmí být URL. Každá položka musí být unikátní v rámci dávky.\n"
+    )
+
+    items = [{"idx": i, "name": k} for i, k in enumerate(keywords)]
+
+    user_prompt = f"""
+Máš dávku položek (pole objektů {{idx, name}}):
+{json.dumps(items, ensure_ascii=False)}
+
+Vrať POUZE JSON pole stejné délky, kde každý prvek má strukturu:
+{{
+  "idx": <číslo z inputu>,
+  "page_title": "...",                        // CZ, {limits.title_min}–{limits.title_max} znaků, obsahuje keyword přirozeně, bez '!'
+  "title_for_newest_advertisement_list": "...", // CZ H1, {limits.h1_min}–{limits.h1_max} znaků, bez '!'
+  "description": "...",                       // CZ, {limits.desc_min}–{limits.desc_max} znaků, bez URL
+  "text_on_page": "...",                      // CZ, ≥{limits.body_min} znaků; struktura: úvod → 2–4 odstavce → závěr/VK
+  "page_title_eng": "...",                    // EN varianta title, stejné rozsahy, bez '!'
+  "title_for_newest_advertisement_list_eng": "...", // EN H1
+  "description_eng": "...",                   // EN description, bez URL
+  "text_on_page_eng": "..."                   // EN text, ≥{limits.body_min} znaků
+}}
+
+POVINNÁ pravidla:
+1) Dodrž délkové limity přesně (nepodkroč ani nepřekroč).
+2) V title/H1 nepoužívej vykřičníky/emoji; v description nesmí být URL.
+3) Klíčové slovo použij přirozeně v page_title, H1, description a v úvodu text_on_page.
+4) Styl: srozumitelný, praktický, bez klišé.
+5) Unikátnost: vyhni se podobnostem k těmto titulům/H1 (hard negatives) i mezi položkami dávky:
+   {json.dumps(hard_negatives[:20], ensure_ascii=False)}
+6) Vrať POUZE JSON pole – žádný text navíc.
+
+Délkové limity:
+{json.dumps(limits_payload, ensure_ascii=False, indent=2)}
+"""
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.6,
+            max_tokens=4000,  # uprav dle velikosti dávky / kontext limitu
+            presence_penalty=0.0,
+            frequency_penalty=0.2,
+        )
+        content = resp["choices"][0]["message"]["content"]
+        start = content.find("[")
+        end = content.rfind("]")
+        arr = json.loads(content[start:end+1])
+
+        out_by_idx = {int(x["idx"]): x for x in arr}
+        results = []
+        for i, k in enumerate(keywords):
+            x = out_by_idx.get(i)
+            if not x:
+                results.append(simple_stub_generate(k, limits))
+            else:
+                results.append({
+                    "page_title": x["page_title"],
+                    "title_for_newest_advertisement_list": x["title_for_newest_advertisement_list"],
+                    "description": x["description"],
+                    "text_on_page": x["text_on_page"],
+                    "page_title_eng": x["page_title_eng"],
+                    "title_for_newest_advertisement_list_eng": x["title_for_newest_advertisement_list_eng"],
+                    "description_eng": x["description_eng"],
+                    "text_on_page_eng": x["text_on_page_eng"],
+                })
+        return results
+    except Exception:
+        return [simple_stub_generate(k, limits) for k in keywords]
+
+
+# -------------------------------
 # Streamlit UI
 # -------------------------------
 
@@ -163,9 +261,10 @@ with st.sidebar:
         desc_max=st.number_input("Description max", 60, 320, DEFAULT_LIMITS.desc_max),
         body_min=st.number_input("Text_on_page min", 500, 5000, DEFAULT_LIMITS.body_min),
     )
-    chunk_sleep = st.slider("Prodleva mezi řádky (s) – kvóty API", 0.0, 5.0, 0.0, 0.5)
+    chunk_sleep = st.slider("Prodleva mezi dávkami (s) – kvóty API", 0.0, 5.0, 0.0, 0.5)
     dedup_title_threshold = st.slider("Prahová podobnost – krátká pole (0–1)", 0.5, 1.0, 0.90, 0.01)
     dedup_body_threshold = st.slider("Prahová podobnost – dlouhá pole (0–1)", 0.5, 1.0, 0.85, 0.01)
+    batch_size = st.number_input("Batch size (OpenAI dávka)", min_value=5, max_value=100, value=20)
 
     # Načte se ze Secrets/ENV a rovnou se předvyplní
     if mode == "OpenAI API":
@@ -217,106 +316,86 @@ if uploaded is not None:
         # --- Progress indikace ---
         progress_text = st.empty()
         progress_bar = st.progress(0)
-        total = len(df)
 
-        for idx, row in df.iterrows():
-            keyword = normalize_keyword(str(row.get(name_col, "")))
+        rows = list(df.itertuples(index=True))
+        total = len(rows)
+        done = 0
 
-            # aktualizace progressu
-            percent = int((idx + 1) / total * 100)
-            progress_bar.progress(percent)
-            progress_text.text(f"Zpracovávám {idx + 1}/{total} – {keyword}...")
+        # Připrav všechna keywords předem
+        all_keywords = [normalize_keyword(str(getattr(r, name_col))) for r in rows]
 
+        # Dávkování
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            batch_keywords = all_keywords[start:end]
+
+            # Hard negatives = dosud vygenerované tituly/H1 (proti opakování)
+            hard_neg = list(dict.fromkeys(prev_titles))[:50]
+
+            # Vygeneruj dávku jedním voláním
             if mode == "Template (offline stub)":
-                rec = simple_stub_generate(keyword, limits)
+                batch_out = [simple_stub_generate(k, limits) for k in batch_keywords]
             else:
-                # OpenAI API režim (fallback na stub, když není k dispozici)
-                if not api_key or openai is None:
-                    rec = simple_stub_generate(keyword, limits)
-                else:
-                    openai.api_key = api_key
-                    sys_prompt = (
-                        "You are a Czech senior copywriter. Generate JSON with keys: "
-                        "page_title (30-50 chars), title_for_newest_advertisement_list (20-40), "
-                        "description (140-160), text_on_page (>=1200). "
-                        "Avoid exclamation marks and URLs in description."
-                    )
-                    user_prompt = f'keyword="{keyword}"'
-                    try:
-                        # Pozn.: starý klient (ChatCompletion); v novém by se použilo Responses API
-                        resp = openai.ChatCompletion.create(
-                            model="gpt-4o-mini",
-                            messages=[
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            temperature=0.7,
-                        )
-                        content = resp["choices"][0]["message"]["content"]
-                        start = content.find("{")
-                        end = content.rfind("}")
-                        payload = json.loads(content[start:end+1])
-                        rec = {
-                            "page_title": payload.get("page_title", ""),
-                            "title_for_newest_advertisement_list": payload.get("title_for_newest_advertisement_list", ""),
-                            "description": payload.get("description", ""),
-                            "text_on_page": payload.get("text_on_page", ""),
-                            "page_title_eng": payload.get("page_title_eng", payload.get("page_title", "")),
-                            "title_for_newest_advertisement_list_eng": payload.get("title_for_newest_advertisement_list_eng", payload.get("title_for_newest_advertisement_list", "")),
-                            "description_eng": payload.get("description_eng", payload.get("description", "")),
-                            "text_on_page_eng": payload.get("text_on_page_eng", payload.get("text_on_page", "")),
-                        }
-                    except Exception:
-                        rec = simple_stub_generate(keyword, limits)
+                batch_out = generate_batch_openai(api_key, batch_keywords, limits, hard_neg)
 
-            # Validation
-            errs = validate_row(rec, limits)
+            # Post-processing a zápis do out_rows pro každý prvek dávky
+            for i, rec in enumerate(batch_out):
+                idx_in_df = rows[start + i].Index
+                row = df.iloc[idx_in_df]
+                keyword = batch_keywords[i]
 
-            # Dedup vs. previous (short fields)
-            sim_t = max([similar_title(rec["page_title"], t) for t in prev_titles], default=0.0)
-            if sim_t >= dedup_title_threshold:
-                rec["page_title"] = ensure_len(
-                    f"{keyword.capitalize()} – přehled a doporučení",
-                    limits.title_min, limits.title_max
-                )
                 errs = validate_row(rec, limits)
 
-            # Dedup body TF-IDF cosine
-            sim_b = max([similar_long(rec["text_on_page"], b) for b in prev_bodies], default=0.0)
-            if sim_b >= dedup_body_threshold:
-                rec["text_on_page"] = rec["text_on_page"] + "\n\nPřidaná sekce: Konkrétní příklad použití a checklist kroků."
-                if len(rec["text_on_page"]) < limits.body_min + 120:
-                    rec["text_on_page"] += " " + " ".join(["Doplnění." for _ in range(40)])
+                # dedup krátkých polí vs. dříve vygenerovaných
+                sim_t = max([similar_title(rec["page_title"], t) for t in prev_titles], default=0.0)
+                if sim_t >= dedup_title_threshold:
+                    rec["page_title"] = ensure_len(
+                        f"{keyword.capitalize()} – přehled a doporučení",
+                        limits.title_min, limits.title_max
+                    )
+                    errs = validate_row(rec, limits)
 
-            prev_titles.append(rec["page_title"])
-            prev_bodies.append(rec["text_on_page"])
+                # dedup dlouhého textu TF-IDF cosine
+                sim_b = max([similar_long(rec["text_on_page"], b) for b in prev_bodies], default=0.0)
+                if sim_b >= dedup_body_threshold:
+                    rec["text_on_page"] = rec["text_on_page"] + "\n\nPřidaná sekce: Konkrétní příklad použití a checklist kroků."
+                    if len(rec["text_on_page"]) < limits.body_min + 120:
+                        rec["text_on_page"] += " " + " ".join(["Doplnění." for _ in range(40)])
 
-            out = {
-                "name": row.get(name_col, ""),
-                "page_title": rec["page_title"],
-                "page_title_eng": rec["page_title_eng"],
-                "description": rec["description"],
-                "description_eng": rec["description_eng"],
-                "text_on_page": rec["text_on_page"],
-                "text_on_page_eng": rec["text_on_page_eng"],
-                "title_for_newest_advertisement_list": rec["title_for_newest_advertisement_list"],
-                "title_for_newest_advertisement_list_eng": rec["title_for_newest_advertisement_list_eng"],
-            }
-            out_rows.append(out)
-            logs.append({
-                "row": int(idx),
-                "keyword": keyword,
-                "errors": errs,
-                "sim_title": sim_t,
-                "sim_body": sim_b
-            })
+                prev_titles.append(rec["page_title"])
+                prev_bodies.append(rec["text_on_page"])
 
+                out_rows.append({
+                    "name": row.get(name_col, ""),
+                    "page_title": rec["page_title"],
+                    "page_title_eng": rec["page_title_eng"],
+                    "description": rec["description"],
+                    "description_eng": rec["description_eng"],
+                    "text_on_page": rec["text_on_page"],
+                    "text_on_page_eng": rec["text_on_page_eng"],
+                    "title_for_newest_advertisement_list": rec["title_for_newest_advertisement_list"],
+                    "title_for_newest_advertisement_list_eng": rec["title_for_newest_advertisement_list_eng"],
+                })
+
+                logs.append({
+                    "row": int(idx_in_df),
+                    "keyword": keyword,
+                    "errors": errs,
+                    "sim_title": sim_t,
+                    "sim_body": sim_b
+                })
+
+            # progress update
+            done = end
+            percent = int(done / total * 100) if total else 100
+            progress_bar.progress(percent)
+            progress_text.text(f"Zpracováno {done}/{total} (dávka {start+1}–{end})")
             if chunk_sleep > 0:
                 time.sleep(chunk_sleep)
 
         # --- Progress: dokončeno ---
         progress_bar.empty()
-        progress_text.text("✅ Hotovo – generování dokončeno.")
+        progress_text.text("✅ Hotovo – generování dávkami dokončeno.")
 
         out_df = pd.DataFrame(out_rows)
         st.subheader("Výsledek")
