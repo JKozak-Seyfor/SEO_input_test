@@ -59,7 +59,6 @@ def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None
 
 
 def simple_stub_generate(keyword: str, limits: Limits) -> dict:
-    """Fallback, když selže OpenAI – generická, ale validní data."""
     kw = (keyword or "Téma").capitalize()
     body = (
         f"<h3>{kw}</h3>\n"
@@ -118,27 +117,67 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 # OpenAI helpers (GPT-5 nano/mini)
 # -------------------------------
 
-def _call_openai_json_safe(model_name: str, messages: list) -> str:
+def _json_array_schema(limits: Limits) -> dict:
+    """JSON schema, které vynutí pole s požadovanými klíči a rozsahy (především strukturu)."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "BatchOutputs",
+            "strict": True,
+            "schema": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "idx": {"type": "integer"},
+                        "page_title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "text_on_page": {"type": "string"},
+                        "title_for_newest_advertisement_list": {"type": "string"},
+                        "page_title_eng": {"type": "string"},
+                        "description_eng": {"type": "string"},
+                        "text_on_page_eng": {"type": "string"},
+                        "title_for_newest_advertisement_list_eng": {"type": "string"},
+                    },
+                    "required": [
+                        "idx",
+                        "page_title",
+                        "description",
+                        "text_on_page",
+                        "title_for_newest_advertisement_list",
+                        "page_title_eng",
+                        "description_eng",
+                        "text_on_page_eng",
+                        "title_for_newest_advertisement_list_eng",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    }
+
+
+def _call_openai_json_safe(model_name: str, messages: list, limits: Limits) -> str:
     """
-    Volá ChatCompletion s parametrem max_completion_tokens.
-    Nejprve se pokusí o JSON režim (response_format=json_object).
-    Když JSON režim selže, použije standardní odpověď (pořád s max_completion_tokens).
+    Volá ChatCompletion s max_completion_tokens.
+    1) Zkusí response_format=json_schema (pole).
+    2) Fallback: standardní výstup bez response_format.
     """
     st.caption(f"🔌 Volám OpenAI • model: **{model_name}**")
 
-    # 1) JSON mode
+    # 1) JSON schema – přímo pole []
     try:
         resp = openai.ChatCompletion.create(
             model=model_name,
             messages=messages,
-            max_completion_tokens=4000,  # moderní param
-            response_format={"type": "json_object"},
+            max_completion_tokens=4000,
+            response_format=_json_array_schema(limits),
         )
         return resp["choices"][0]["message"]["content"]
-    except Exception as e_json:
-        st.warning(f"JSON mode selhal: {e_json}. Zkouším standardní volání.")
+    except Exception as e_schema:
+        st.warning(f"JSON schema režim selhal: {e_schema}. Zkouším standardní volání.")
 
-    # 2) Standardní výstup
+    # 2) Standardní výstup – stále prosíme o pole ve výstupu (promptem)
     resp = openai.ChatCompletion.create(
         model=model_name,
         messages=messages,
@@ -195,7 +234,7 @@ DŮLEŽITÉ:
 • Styl: smyslný, decentní, bez vulgarit.
 • Vyhni se podobnostem s těmito titulky/H1 (hard negatives): {json.dumps(hard_negatives[:30], ensure_ascii=False)}
 
-Odpověz pouze **validním JSON polem** bez úvodního textu, komentářů nebo vysvětlivek.
+Odpověz pouze **validním JSON polem** (array) bez úvodního textu, komentářů nebo vysvětlivek.
 Každý prvek v poli musí odpovídat stejnému pořadí jako vstupní pole 'items'.
 
 Délkové limity pro kontrolu:
@@ -211,14 +250,23 @@ Délkové limity pro kontrolu:
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            limits=limits,
         )
 
-        start, end = content.find("["), content.rfind("]")
-        if start == -1 or end == -1:
-            raise ValueError("Model nevrátil validní JSON pole (chybí '[' nebo ']').")
+        # ---- Robustní parsování ----
+        data = None
+        try:
+            data = json.loads(content)
+        except Exception:
+            # nouzové: pokus zachytit pole mezi prvním '[' a posledním ']'
+            start, end = content.find("["), content.rfind("]")
+            if start != -1 and end != -1:
+                data = json.loads(content[start:end+1])
 
-        arr = json.loads(content[start:end+1])
-        out_by_idx = {int(x["idx"]): x for x in arr}
+        if not isinstance(data, list):
+            raise ValueError("Model nevrátil JSON pole (array).")
+
+        out_by_idx = {int(x["idx"]): x for x in data}
 
         results = []
         for i, k in enumerate(keywords):
@@ -240,7 +288,7 @@ Délkové limity pro kontrolu:
     except Exception as e:
         st.error(f"⚠️ Chyba při zpracování OpenAI odpovědi: {e}")
         if 'content' in locals():
-            st.text_area("Částečný surový obsah odpovědi:", content[:4000])
+            st.text_area("Surový obsah odpovědi (pro ladění):", content[:4000], height=200)
         return [simple_stub_generate(k, limits) for k in keywords]
 
 
