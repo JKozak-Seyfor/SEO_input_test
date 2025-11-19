@@ -59,6 +59,7 @@ def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None
 
 
 def simple_stub_generate(keyword: str, limits: Limits) -> dict:
+    """Fallback, když selže OpenAI – generická, ale validní data."""
     kw = (keyword or "Téma").capitalize()
     body = (
         f"<h3>{kw}</h3>\n"
@@ -117,41 +118,50 @@ def validate_row(rec: dict, limits: Limits) -> list[str]:
 # OpenAI helpers (GPT-5 nano/mini)
 # -------------------------------
 
-def _json_array_schema(limits: Limits) -> dict:
-    """JSON schema, které vynutí pole s požadovanými klíči a rozsahy (především strukturu)."""
+def _json_items_object_schema(limits: Limits) -> dict:
+    """
+    JSON schema musí být 'object', proto vracíme objekt s klíčem 'items' (pole požadovaných objektů).
+    """
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "BatchOutputs",
             "strict": True,
             "schema": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "idx": {"type": "integer"},
-                        "page_title": {"type": "string"},
-                        "description": {"type": "string"},
-                        "text_on_page": {"type": "string"},
-                        "title_for_newest_advertisement_list": {"type": "string"},
-                        "page_title_eng": {"type": "string"},
-                        "description_eng": {"type": "string"},
-                        "text_on_page_eng": {"type": "string"},
-                        "title_for_newest_advertisement_list_eng": {"type": "string"},
-                    },
-                    "required": [
-                        "idx",
-                        "page_title",
-                        "description",
-                        "text_on_page",
-                        "title_for_newest_advertisement_list",
-                        "page_title_eng",
-                        "description_eng",
-                        "text_on_page_eng",
-                        "title_for_newest_advertisement_list_eng",
-                    ],
-                    "additionalProperties": False,
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "idx": {"type": "integer"},
+                                "page_title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "text_on_page": {"type": "string"},
+                                "title_for_newest_advertisement_list": {"type": "string"},
+                                "page_title_eng": {"type": "string"},
+                                "description_eng": {"type": "string"},
+                                "text_on_page_eng": {"type": "string"},
+                                "title_for_newest_advertisement_list_eng": {"type": "string"},
+                            },
+                            "required": [
+                                "idx",
+                                "page_title",
+                                "description",
+                                "text_on_page",
+                                "title_for_newest_advertisement_list",
+                                "page_title_eng",
+                                "description_eng",
+                                "text_on_page_eng",
+                                "title_for_newest_advertisement_list_eng",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    }
                 },
+                "required": ["items"],
+                "additionalProperties": False,
             },
         },
     }
@@ -159,25 +169,24 @@ def _json_array_schema(limits: Limits) -> dict:
 
 def _call_openai_json_safe(model_name: str, messages: list, limits: Limits) -> str:
     """
-    Volá ChatCompletion s max_completion_tokens.
-    1) Zkusí response_format=json_schema (pole).
-    2) Fallback: standardní výstup bez response_format.
+    1) Zkusí response_format=json_schema (vrací objekt s klíčem 'items').
+    2) Fallback: standardní výstup s max_completion_tokens.
     """
     st.caption(f"🔌 Volám OpenAI • model: **{model_name}**")
 
-    # 1) JSON schema – přímo pole []
+    # 1) JSON schema – objekt { "items": [ ... ] }
     try:
         resp = openai.ChatCompletion.create(
             model=model_name,
             messages=messages,
             max_completion_tokens=4000,
-            response_format=_json_array_schema(limits),
+            response_format=_json_items_object_schema(limits),
         )
         return resp["choices"][0]["message"]["content"]
     except Exception as e_schema:
         st.warning(f"JSON schema režim selhal: {e_schema}. Zkouším standardní volání.")
 
-    # 2) Standardní výstup – stále prosíme o pole ve výstupu (promptem)
+    # 2) Standardní výstup – bez response_format
     resp = openai.ChatCompletion.create(
         model=model_name,
         messages=messages,
@@ -211,7 +220,9 @@ def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, har
     items = [{"idx": i, "name": k} for i, k in enumerate(keywords)]
 
     user_prompt = f"""
-Máš pole objektů ({{idx, name}}):
+Vrať JSON **objekt** s klíčem "items", kde "items" je pole objektů (pořadí musí odpovídat vstupu níže).
+
+Vstupní položky ({{idx, name}}):
 {json.dumps(items, ensure_ascii=False)}
 
 Pro každou položku vytvoř objekt se strukturou:
@@ -228,15 +239,13 @@ Pro každou položku vytvoř objekt se strukturou:
 }}
 
 DŮLEŽITÉ:
-• Každý objekt v poli odpovídá jednomu klíčovému slovu (name) a obsah MUSÍ být tematicky přizpůsoben tomuto názvu
+• Každý objekt odpovídá jednomu 'name' a obsah MUSÍ být tematicky přizpůsoben tomuto názvu
   (např. „eroticke-masaze“, „privat“, „nocni-club“…).
 • NEPOUŽÍVEJ generické fráze jako „patří mezi témata, která lidé často hledají“.
 • Styl: smyslný, decentní, bez vulgarit.
 • Vyhni se podobnostem s těmito titulky/H1 (hard negatives): {json.dumps(hard_negatives[:30], ensure_ascii=False)}
 
-Odpověz pouze **validním JSON polem** (array) bez úvodního textu, komentářů nebo vysvětlivek.
-Každý prvek v poli musí odpovídat stejnému pořadí jako vstupní pole 'items'.
-
+Odpověz pouze **validním JSON objektem**: {{"items":[...]}} – žádný doprovodný text.
 Délkové limity pro kontrolu:
 {json.dumps(limits_payload, ensure_ascii=False, indent=2)}
 """
@@ -258,15 +267,21 @@ Délkové limity pro kontrolu:
         try:
             data = json.loads(content)
         except Exception:
-            # nouzové: pokus zachytit pole mezi prvním '[' a posledním ']'
-            start, end = content.find("["), content.rfind("]")
-            if start != -1 and end != -1:
-                data = json.loads(content[start:end+1])
+            # nouzově zkusíme vyříznout objekt { ... } nebo pole [...]
+            if "items" in content:
+                start = content.find("{")
+                end = content.rfind("}")
+                if start != -1 and end != -1:
+                    data = json.loads(content[start:end+1])
+            else:
+                s, e = content.find("["), content.rfind("]")
+                if s != -1 and e != -1:
+                    data = {"items": json.loads(content[s:e+1])}
 
-        if not isinstance(data, list):
-            raise ValueError("Model nevrátil JSON pole (array).")
+        if not isinstance(data, dict) or "items" not in data or not isinstance(data["items"], list):
+            raise ValueError("Model nevrátil JSON objekt s klíčem 'items' (pole).")
 
-        out_by_idx = {int(x["idx"]): x for x in data}
+        out_by_idx = {int(x["idx"]): x for x in data["items"]}
 
         results = []
         for i, k in enumerate(keywords):
