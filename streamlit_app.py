@@ -1,417 +1,106 @@
-import os
-import io
-import re
-import json
-import time
-from dataclasses import dataclass
 import streamlit as st
-import pandas as pd
-from difflib import SequenceMatcher
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import requests
+import io
+from docx import Document
 
-try:
-    import openai
-except Exception:
-    openai = None
+# ── Page config ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="SEO Brief Generator",
+    page_icon="📝",
+    layout="centered",
+)
 
-
-# -------------------------------
-# Config & helpers
-# -------------------------------
-
-@dataclass
-class Limits:
-    title_min: int = 30
-    title_max: int = 50
-    h1_min: int = 20
-    h1_max: int = 40
-    desc_min: int = 140
-    desc_max: int = 160
-    body_min: int = 1200
-
-DEFAULT_LIMITS = Limits()
-
-BANNED_PATTERN_TITLE = re.compile(r"[!]")
-URL_PATTERN = re.compile(r"https?://|www\.", re.I)
-
-
-def normalize_keyword(name: str) -> str:
-    if not isinstance(name, str):
-        return ""
-    s = name.strip()
-    s = re.sub(r"^https?://", "", s, flags=re.I)
-    s = s.strip("/")
-    s = s.replace("-", " ")
-    s = re.sub(r"[_/]", " ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s if s else ""
-
-
-def ensure_len(text: str, min_len: int | None = None, max_len: int | None = None) -> str:
-    t = (text or "").strip()
-    if min_len and len(t) < min_len:
-        t += " " + (" ".join(["…" for _ in range(min_len - len(t))]))
-    if max_len and len(t) > max_len:
-        t = t[:max_len]
-        t = re.sub(r"\s+\S*$", "", t)
-    return t
-
-
-def simple_stub_generate(keyword: str, limits: Limits) -> dict:
-    """Fallback, když selže OpenAI – generická, ale validní data."""
-    kw = (keyword or "Téma").capitalize()
-    body = (
-        f"<h3>{kw}</h3>\n"
-        f"{kw} patří mezi témata, která lidé často hledají, ale zároveň u nich narážejí na rozporné informace. "
-        f"V tomto přehledu shrnujeme klíčové pojmy, přínosy a omyly."
-    )
-    if len(body) < limits.body_min:
-        body += " " + " ".join(["Rozšiřující text." for _ in range(80)])
-
-    return {
-        "page_title": ensure_len(f"{kw} – průvodce a tipy", limits.title_min, limits.title_max),
-        "title_for_newest_advertisement_list": ensure_len(f"{kw} – novinky a přehled", limits.h1_min, limits.h1_max),
-        "description": ensure_len(
-            f"{kw} v kostce: co to je, k čemu slouží a jak z něj vytěžit maximum. Praktické rady a stručné tipy v jednom místě.",
-            limits.desc_min, limits.desc_max,
-        ),
-        "text_on_page": ensure_len(body, min_len=limits.body_min),
-        "page_title_eng": ensure_len(f"{kw} – guide and tips", limits.title_min, limits.title_max),
-        "title_for_newest_advertisement_list_eng": ensure_len(f"{kw} – updates and overview", limits.h1_min, limits.h1_max),
-        "description_eng": ensure_len(
-            f"{kw} explained: what it is, where it helps and how to make the most of it. Practical advice and concise tips in one place.",
-            limits.desc_min, limits.desc_max,
-        ),
-        "text_on_page_eng": ensure_len(body, min_len=limits.body_min),
+# ── Minimal custom CSS ────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .block-container { max-width: 680px; padding-top: 2.5rem; }
+    .stTextInput > label, .stTextArea > label,
+    .stSelectbox > label, .stFileUploader > label {
+        font-weight: 600;
+        font-size: 0.9rem;
+        letter-spacing: 0.02em;
     }
+    .stAlert { border-radius: 8px; }
+</style>
+""", unsafe_allow_html=True)
 
+# ── Webhook URL ze Streamlit secrets ─────────────────────────────────────────
+WEBHOOK_URL = st.secrets.get("WEBHOOK_URL", "")
 
-def similar_title(a: str, b: str) -> float:
-    return SequenceMatcher(None, a or "", b or "").ratio()
+# ── Klienti ───────────────────────────────────────────────────────────────────
+CLIENTS = ["mBank"]
 
+# ── UI ────────────────────────────────────────────────────────────────────────
+st.title("SEO Brief Generator")
+st.markdown("Zadej téma článku a agent automaticky sestaví keyword brief.")
+st.divider()
 
-def similar_long(a: str, b: str) -> float:
-    vect = TfidfVectorizer(ngram_range=(3, 5), min_df=1)
-    X = vect.fit_transform([a or "", b or ""])
-    return float(cosine_similarity(X[0], X[1])[0, 0])
+client_id = st.selectbox(
+    "Klient",
+    options=CLIENTS,
+    help="Vyber klienta – nastaví keyword pravidla a brand kontext.",
+)
 
+topic = st.text_input(
+    "Téma článku",
+    placeholder="např. Švarcsystém: co to je, kdy hrozí pokuta a jak se mu vyhnout",
+    help="Napiš téma co nejkonkrétněji – agent z něj odvodí seed keywords.",
+)
 
-def validate_row(rec: dict, limits: Limits) -> list[str]:
-    errs = []
-    if not (limits.title_min <= len(rec["page_title"]) <= limits.title_max):
-        errs.append("page_title length out of range")
-    if not (limits.h1_min <= len(rec["title_for_newest_advertisement_list"]) <= limits.h1_max):
-        errs.append("H1 length out of range")
-    if not (limits.desc_min <= len(rec["description"]) <= limits.desc_max):
-        errs.append("description length out of range")
-    if not (len(rec["text_on_page"]) >= limits.body_min):
-        errs.append("text_on_page too short")
-    if BANNED_PATTERN_TITLE.search(rec["page_title"]):
-        errs.append("page_title contains '!'")
-    if URL_PATTERN.search(rec["description"]):
-        errs.append("description contains URL")
-    return errs
+notes = st.text_area(
+    "Poznámky (volitelné)",
+    placeholder="např. rozšíření existujícího článku, zaměření na OSVČ, délka ~2000 slov…",
+    height=100,
+)
 
+uploaded_file = st.file_uploader(
+    "Existující článek (volitelné)",
+    type=["docx"],
+    help="Nahraj .docx, pokud jde o rozšíření nebo přepracování existujícího textu.",
+)
 
-# -------------------------------
-# OpenAI helpers (GPT-5 nano/mini)
-# -------------------------------
+st.divider()
+submit = st.button("Spustit agenta →", type="primary", use_container_width=True)
 
-def _json_items_object_schema(limits: Limits) -> dict:
-    """
-    JSON schema musí být 'object', proto vracíme objekt s klíčem 'items' (pole požadovaných objektů).
-    """
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "BatchOutputs",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "idx": {"type": "integer"},
-                                "page_title": {"type": "string"},
-                                "description": {"type": "string"},
-                                "text_on_page": {"type": "string"},
-                                "title_for_newest_advertisement_list": {"type": "string"},
-                                "page_title_eng": {"type": "string"},
-                                "description_eng": {"type": "string"},
-                                "text_on_page_eng": {"type": "string"},
-                                "title_for_newest_advertisement_list_eng": {"type": "string"},
-                            },
-                            "required": [
-                                "idx",
-                                "page_title",
-                                "description",
-                                "text_on_page",
-                                "title_for_newest_advertisement_list",
-                                "page_title_eng",
-                                "description_eng",
-                                "text_on_page_eng",
-                                "title_for_newest_advertisement_list_eng",
-                            ],
-                            "additionalProperties": False,
-                        },
-                    }
-                },
-                "required": ["items"],
-                "additionalProperties": False,
-            },
-        },
-    }
+# ── Logika odeslání ───────────────────────────────────────────────────────────
+if submit:
+    # Validace
+    if not topic.strip():
+        st.error("Téma článku je povinné.")
+        st.stop()
 
+    if not WEBHOOK_URL:
+        st.error("WEBHOOK_URL není nastavena v secrets.toml.")
+        st.stop()
 
-def _call_openai_json_safe(model_name: str, messages: list, limits: Limits) -> str:
-    """
-    1) Zkusí response_format=json_schema (vrací objekt s klíčem 'items').
-    2) Fallback: standardní výstup s max_completion_tokens.
-    """
-    st.caption(f"🔌 Volám OpenAI • model: **{model_name}**")
-
-    # 1) JSON schema – objekt { "items": [ ... ] }
-    try:
-        resp = openai.ChatCompletion.create(
-            model=model_name,
-            messages=messages,
-            max_completion_tokens=4000,
-            response_format=_json_items_object_schema(limits),
-        )
-        return resp["choices"][0]["message"]["content"]
-    except Exception as e_schema:
-        st.warning(f"JSON schema režim selhal: {e_schema}. Zkouším standardní volání.")
-
-    # 2) Standardní výstup – bez response_format
-    resp = openai.ChatCompletion.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=4000,
-    )
-    return resp["choices"][0]["message"]["content"]
-
-
-# -------------------------------
-# OpenAI batch generator
-# -------------------------------
-
-def generate_batch_openai(api_key: str, keywords: list[str], limits: Limits, hard_negatives: list[str], model_name: str) -> list[dict]:
-    if openai is None or not api_key:
-        return [simple_stub_generate(k, limits) for k in keywords]
-
-    openai.api_key = api_key
-    limits_payload = {
-        "page_title": {"min": limits.title_min, "max": limits.title_max},
-        "h1": {"min": limits.h1_min, "max": limits.h1_max},
-        "description": {"min": limits.desc_min, "max": limits.desc_max},
-        "text_on_page_min": limits.body_min,
-    }
-
-    sys_prompt = (
-        "You are a skilled Czech SEO copywriter specializing in tasteful adult-oriented content. "
-        "Generate unique, structured website texts in Czech and English exactly according to the JSON format provided. "
-        "No exclamation marks, no vulgarities, no URLs. Titles and descriptions must fit the length limits strictly."
-    )
-
-    items = [{"idx": i, "name": k} for i, k in enumerate(keywords)]
-
-    user_prompt = f"""
-Vrať JSON **objekt** s klíčem "items", kde "items" je pole objektů (pořadí musí odpovídat vstupu níže).
-
-Vstupní položky ({{idx, name}}):
-{json.dumps(items, ensure_ascii=False)}
-
-Pro každou položku vytvoř objekt se strukturou:
-{{
-  "idx": <číslo z inputu>,
-  "page_title": "...",                         // CZ, 30–50 znaků, přirozeně obsahuje keyword (benefit/lákadlo), bez '!'
-  "description": "...",                        // CZ, 140–160 znaků, shrnutí + jemné CTA, bez URL
-  "text_on_page": "...",                       // CZ, ≥{limits.body_min} znaků, HTML-like: úvod → 2–3 H3 podtémata → závěr
-  "title_for_newest_advertisement_list": "...",// CZ H1, 20–40 znaků, krátké, úderné, bez '!'
-  "page_title_eng": "...",                     // EN varianta title, stejné limity
-  "description_eng": "...",                    // EN varianta description, bez URL
-  "text_on_page_eng": "...",                   // EN text, zachovej strukturu, ≥{limits.body_min} znaků
-  "title_for_newest_advertisement_list_eng": "..." // EN H1
-}}
-
-DŮLEŽITÉ:
-• Každý objekt odpovídá jednomu 'name' a obsah MUSÍ být tematicky přizpůsoben tomuto názvu
-  (např. „eroticke-masaze“, „privat“, „nocni-club“…).
-• NEPOUŽÍVEJ generické fráze jako „patří mezi témata, která lidé často hledají“.
-• Styl: smyslný, decentní, bez vulgarit.
-• Vyhni se podobnostem s těmito titulky/H1 (hard negatives): {json.dumps(hard_negatives[:30], ensure_ascii=False)}
-
-Odpověz pouze **validním JSON objektem**: {{"items":[...]}} – žádný doprovodný text.
-Délkové limity pro kontrolu:
-{json.dumps(limits_payload, ensure_ascii=False, indent=2)}
-"""
-
-    st.info(f"📡 Odesílám dávku {len(keywords)} klíčových slov do OpenAI • model: **{model_name}**")
-
-    try:
-        content = _call_openai_json_safe(
-            model_name=model_name,
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            limits=limits,
-        )
-
-        # ---- Robustní parsování ----
-        data = None
+    # Extrakce textu z docx
+    existing_article = ""
+    if uploaded_file is not None:
         try:
-            data = json.loads(content)
-        except Exception:
-            # nouzově zkusíme vyříznout objekt { ... } nebo pole [...]
-            if "items" in content:
-                start = content.find("{")
-                end = content.rfind("}")
-                if start != -1 and end != -1:
-                    data = json.loads(content[start:end+1])
-            else:
-                s, e = content.find("["), content.rfind("]")
-                if s != -1 and e != -1:
-                    data = {"items": json.loads(content[s:e+1])}
-
-        if not isinstance(data, dict) or "items" not in data or not isinstance(data["items"], list):
-            raise ValueError("Model nevrátil JSON objekt s klíčem 'items' (pole).")
-
-        out_by_idx = {int(x["idx"]): x for x in data["items"]}
-
-        results = []
-        for i, k in enumerate(keywords):
-            x = out_by_idx.get(i)
-            results.append(simple_stub_generate(k, limits) if not x else {
-                "page_title": x.get("page_title", ""),
-                "title_for_newest_advertisement_list": x.get("title_for_newest_advertisement_list", ""),
-                "description": x.get("description", ""),
-                "text_on_page": x.get("text_on_page", ""),
-                "page_title_eng": x.get("page_title_eng", ""),
-                "title_for_newest_advertisement_list_eng": x.get("title_for_newest_advertisement_list_eng", ""),
-                "description_eng": x.get("description_eng", ""),
-                "text_on_page_eng": x.get("text_on_page_eng", ""),
-            })
-
-        st.success("✅ Odpověď z OpenAI přijata a zpracována.")
-        return results
-
-    except Exception as e:
-        st.error(f"⚠️ Chyba při zpracování OpenAI odpovědi: {e}")
-        if 'content' in locals():
-            st.text_area("Surový obsah odpovědi (pro ladění):", content[:4000], height=200)
-        return [simple_stub_generate(k, limits) for k in keywords]
-
-
-# -------------------------------
-# Streamlit UI
-# -------------------------------
-
-st.set_page_config(page_title="CSV Content Generator (GPT-5 nano/mini)", layout="wide")
-st.title("CSV Content Generator (CZ/EN) — GPT-5 nano/mini")
-
-with st.sidebar:
-    st.header("Nastavení")
-    mode = st.selectbox("Režim", ["Template (offline stub)", "OpenAI API"], index=1)
-
-    model_name = st.selectbox(
-        "OpenAI model",
-        options=["gpt-5-nano", "gpt-5-mini"],
-        index=0,
-        help="nano = levnější/rychlejší, mini = vyšší kvalita"
-    )
-    st.caption(f"Použitý model: **{model_name}**")
-
-    batch_size = st.number_input("Batch size", 1, 20, 5)
-    chunk_sleep = st.slider("Prodleva mezi dávkami (s)", 0.0, 5.0, 0.0, 0.5)
-    api_key = st.text_input("OPENAI_API_KEY", type="password", value=os.environ.get("OPENAI_API_KEY", ""))
-
-uploaded = st.file_uploader("Nahraj CSV nebo XLSX", type=["csv", "xlsx"])
-if uploaded is not None and isinstance(uploaded, list):
-    uploaded = uploaded[0]
-
-if uploaded:
-    if hasattr(uploaded, "name") and uploaded.name.lower().endswith(".xlsx"):
-        try:
-            df = pd.read_excel(uploaded, engine="openpyxl")
+            doc = Document(io.BytesIO(uploaded_file.read()))
+            existing_article = "\n".join(
+                p.text for p in doc.paragraphs if p.text.strip()
+            )
         except Exception as e:
-            st.error(f"Chyba při čtení XLSX: {e}")
+            st.error(f"Nepodařilo se načíst soubor: {e}")
             st.stop()
-    else:
-        data = uploaded.getvalue().decode("utf-8", errors="ignore")
+
+    # Sestavení payloadu
+    payload = {
+        "client_id": client_id,
+        "topic": topic.strip(),
+        "notes": notes.strip(),
+        "existing_article": existing_article,
+    }
+
+    # Odeslání na webhook
+    with st.spinner("Odesílám na agenta…"):
         try:
-            df = pd.read_csv(io.StringIO(data), sep=";")
-        except Exception:
-            df = pd.read_csv(io.StringIO(data), sep=",")
-
-    st.subheader("Náhled")
-    st.dataframe(df.head())
-
-    cols = df.columns.tolist()
-    name_col = st.selectbox("Sloupec s Name", cols, index=cols.index("name") if "name" in cols else 0)
-
-    if st.button("Generovat dávkově"):
-        out_rows, logs = [], []
-        prev_titles, prev_bodies = [], []
-
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-
-        rows = list(df.itertuples(index=True))
-        total = len(rows)
-        done = 0
-
-        all_keywords = [normalize_keyword(str(getattr(r, name_col))) for r in rows]
-
-        for start in range(0, total, batch_size):
-            end = min(start + batch_size, total)
-            batch_keywords = all_keywords[start:end]
-            hard_neg = list(dict.fromkeys(prev_titles))[:30]
-
-            if mode == "OpenAI API":
-                batch_out = generate_batch_openai(api_key, batch_keywords, DEFAULT_LIMITS, hard_neg, model_name)
-            else:
-                batch_out = [simple_stub_generate(k, DEFAULT_LIMITS) for k in batch_keywords]
-
-            for i, rec in enumerate(batch_out):
-                idx_in_df = rows[start + i].Index
-                row = df.iloc[idx_in_df]
-                keyword = batch_keywords[i]
-
-                errs = validate_row(rec, DEFAULT_LIMITS)
-
-                prev_titles.append(rec["page_title"])
-                prev_bodies.append(rec["text_on_page"])
-
-                out_rows.append({"name": row.get(name_col, ""), **rec})
-                logs.append({"row": int(idx_in_df), "keyword": keyword, "errors": errs})
-
-            done = end
-            progress_bar.progress(int(done / total * 100))
-            progress_text.text(f"Zpracováno {done}/{total} (dávka {start+1}–{end})")
-
-            if chunk_sleep > 0:
-                time.sleep(chunk_sleep)
-
-        progress_bar.empty()
-        progress_text.text("✅ Hotovo – generování dávkami dokončeno.")
-
-        out_df = pd.DataFrame(out_rows)
-        st.subheader("Výsledek (náhled)")
-        st.dataframe(out_df.head(50))
-
-        st.download_button(
-            "Stáhnout CSV (UTF-8)",
-            out_df.to_csv(index=False).encode("utf-8"),
-            "doplnene_texty.csv",
-            mime="text/csv"
-        )
-
-        st.subheader("Log validačních kontrol")
-        st.json(logs)
-else:
-    st.info("Nahraj CSV/XLSX se sloupcem 'name'.")
+            response = requests.post(WEBHOOK_URL, json=payload, timeout=30)
+            response.raise_for_status()
+            st.success("✅ Agent spuštěn. Brief bude brzy k dispozici.")
+            st.caption(f"Status: {response.status_code} · Klient: {client_id} · Téma: {topic}")
+        except requests.exceptions.Timeout:
+            st.error("Webhook neodpověděl včas (timeout 30 s). Zkus to znovu.")
+        except requests.exceptions.RequestException as e:
+            st.error(f"Chyba při odesílání: {e}")
