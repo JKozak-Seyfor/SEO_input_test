@@ -28,7 +28,7 @@ st.markdown("""
 WEBHOOK_URL = st.secrets.get("WEBHOOK_URL", "")
 
 # ── Klienti ───────────────────────────────────────────────────────────────────
-CLIENTS = ["mBank", "Vema", "MERP"]
+CLIENTS = ["mBank", "Vema", "MERP", "Seyfor"]
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.title("SEO Brief Generator")
